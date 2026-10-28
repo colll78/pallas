@@ -329,15 +329,37 @@ where
                 fields: d.decode_with(ctx)?,
                 any_constructor: None,
             }),
-            102 => {
-                d.array()?;
-
-                Ok(Constr {
+            // The general form: a pair of the constructor index and the
+            // fields, as a list of exactly two elements, definite or
+            // indefinite (`decodeConstrExtended` in plutus-core).
+            102 => match d.array()? {
+                Some(2) => Ok(Constr {
                     tag: x,
                     any_constructor: Some(d.decode_with(ctx)?),
                     fields: d.decode_with(ctx)?,
-                })
-            }
+                }),
+                Some(_) => Err(minicbor::decode::Error::message(
+                    "expected exactly two elements in a tag 102 constr",
+                )),
+                None => {
+                    let any_constructor = d.decode_with(ctx)?;
+                    let fields = d.decode_with(ctx)?;
+
+                    if d.datatype()? != minicbor::data::Type::Break {
+                        return Err(minicbor::decode::Error::message(
+                            "expected exactly two elements in a tag 102 constr",
+                        ));
+                    }
+                    // Consume the break.
+                    d.set_position(d.position() + 1);
+
+                    Ok(Constr {
+                        tag: x,
+                        any_constructor: Some(any_constructor),
+                        fields,
+                    })
+                }
+            },
             _ => Err(minicbor::decode::Error::message(
                 "bad tag code for plutus data",
             )),
@@ -659,6 +681,70 @@ mod tests {
             any_constructor: Some(any_constructor),
             fields: MaybeIndefArray::Def(fields.to_vec()),
         })
+    }
+
+    fn decode_hex(cbor: &str) -> Result<PlutusData, minicbor::decode::Error> {
+        minicbor::decode(&hex::decode(cbor).unwrap())
+    }
+
+    fn assert_same_encoding(cbor: &str, expected: PlutusData) {
+        let decoded = decode_hex(cbor).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            hex::encode(minicbor::to_vec(&decoded).unwrap()),
+            hex::encode(minicbor::to_vec(&expected).unwrap())
+        );
+    }
+
+    #[test]
+    fn tag_102_definite_pair() {
+        // 102([128, []])
+        assert_same_encoding("d86682188080", constr_any(128, &[]));
+    }
+
+    #[test]
+    fn tag_102_indefinite_pair() {
+        // 102([_ 128, [1]])
+        assert_same_encoding("d8669f18808101ff", constr_any(128, &[int(1)]));
+    }
+
+    #[test]
+    fn tag_102_indefinite_pair_followed_by_a_sibling() {
+        // [_ 102([_ 128, []]), 5]
+        assert_same_encoding(
+            "9fd8669f188080ff05ff",
+            array_indef(&[constr_any(128, &[]), int(5)]),
+        );
+        // [102([_ 128, []]), 5]
+        assert_same_encoding(
+            "82d8669f188080ff05",
+            array_def(&[constr_any(128, &[]), int(5)]),
+        );
+        // {102([_ 128, []]): 5}
+        assert_same_encoding(
+            "a1d8669f188080ff05",
+            map_def(&[(constr_any(128, &[]), int(5))]),
+        );
+    }
+
+    #[test]
+    fn tag_102_indefinite_pair_without_a_break() {
+        // At the end of the input.
+        assert!(decode_hex("d8669f188080").is_err());
+        // Followed by a sibling.
+        assert!(decode_hex("9fd8669f18808005ff").is_err());
+    }
+
+    #[test]
+    fn tag_102_indefinite_list_of_three() {
+        assert!(decode_hex("d8669f18808001ff").is_err());
+    }
+
+    #[test]
+    fn tag_102_definite_list_of_other_lengths() {
+        assert!(decode_hex("d86680").is_err());
+        assert!(decode_hex("d866811880").is_err());
+        assert!(decode_hex("d8668318808001").is_err());
     }
 
     // Bytes <-> ...
